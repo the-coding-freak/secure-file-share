@@ -1,0 +1,2 @@
+The setup script in package.json now works correctly.
+Backend dependencies are managed separately in backend/package.json.

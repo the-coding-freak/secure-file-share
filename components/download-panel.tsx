@@ -4,17 +4,21 @@ import type { ChangeEvent } from "react"
 import { useEffect, useMemo, useState } from "react"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
+import { Badge } from "@/components/ui/badge"
 import { Card } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import { Switch } from "@/components/ui/switch"
 import { Textarea } from "@/components/ui/textarea"
+import { Progress } from "@/components/ui/progress"
+import { useToast } from "@/hooks/use-toast"
 import { useWallet } from "@/hooks/use-wallet"
 import { decryptData, unwrapAesKeyWithRsa } from "@/lib/crypto"
 import { RSA_PRIVATE_KEY_STORAGE_KEY } from "@/lib/key-storage"
 import { getCidForCurrentAccount, getEncryptedKeyForCurrentAccount, hasUserAccess } from "@/lib/contract"
 import { retrieveFromPinata } from "@/lib/ipfs"
 import { getConnectedAddress } from "@/lib/wallet"
-import { CheckCircle2, Download, FileQuestion, Loader2, ShieldAlert, Wallet } from "lucide-react"
+import { CheckCircle2, Copy, Download, FileQuestion, Loader2, ShieldAlert, Wallet } from "lucide-react"
 
 interface DownloadResult {
   cid: string
@@ -49,20 +53,38 @@ function base64ToUint8Array(base64: string): Uint8Array {
   return bytes
 }
 
+const LAST_FILE_ID_KEY = "secure-share:last-file-id"
+const CACHE_OPT_IN_KEY = "secure-share:remember-download"
+
 export function DownloadPanel() {
   const { address, isConnected, connect, connecting } = useWallet()
+  const { toast } = useToast()
   const [fileId, setFileId] = useState("")
   const [privateKey, setPrivateKey] = useState<string | null>(null)
   const [status, setStatus] = useState<StatusState>({ step: "Idle", error: null })
   const [isProcessing, setIsProcessing] = useState(false)
   const [result, setResult] = useState<DownloadResult | null>(null)
-  const [rawPayload, setRawPayload] = useState<string | null>(null)
+  const [privateKeyDraft, setPrivateKeyDraft] = useState("")
+  const [rememberFileId, setRememberFileId] = useState(true)
+  const [progress, setProgress] = useState(0)
 
   useEffect(() => {
     if (typeof window === "undefined") {
       return
     }
-    setPrivateKey(window.localStorage.getItem(RSA_PRIVATE_KEY_STORAGE_KEY))
+    const storedPrivateKey = window.localStorage.getItem(RSA_PRIVATE_KEY_STORAGE_KEY)
+    if (storedPrivateKey) {
+      setPrivateKey(storedPrivateKey)
+      setPrivateKeyDraft(storedPrivateKey)
+    }
+    const remembered = window.localStorage.getItem(CACHE_OPT_IN_KEY)
+    if (remembered === "false") {
+      setRememberFileId(false)
+    }
+    const lastId = window.localStorage.getItem(LAST_FILE_ID_KEY)
+    if (lastId) {
+      setFileId(lastId)
+    }
   }, [])
 
   useEffect(() => {
@@ -88,9 +110,9 @@ export function DownloadPanel() {
 
   const handleFileIdChange = (event: ChangeEvent<HTMLInputElement>) => {
     setFileId(event.target.value)
-    setResult(null)
-    setRawPayload(null)
+  setResult(null)
     setStatus({ step: "Idle", error: null })
+    setProgress(0)
   }
 
   const resetResult = () => {
@@ -98,7 +120,6 @@ export function DownloadPanel() {
       URL.revokeObjectURL(result.downloadUrl)
     }
     setResult(null)
-    setRawPayload(null)
   }
 
   const handleDownload = async () => {
@@ -121,20 +142,24 @@ export function DownloadPanel() {
 
     try {
       setStatus({ step: "Checking access", error: null })
+      setProgress(10)
       const canAccess = await hasUserAccess(trimmedId, activeAccount)
       if (!canAccess) {
         setStatus({ step: "Access denied", error: "Access not granted or has been revoked for this wallet." })
+        setProgress(0)
         setIsProcessing(false)
         return
       }
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : "Unable to verify access permissions."
       setStatus({ step: "Access check failed", error: message })
+      setProgress(0)
       setIsProcessing(false)
       return
     }
 
     setStatus({ step: "Fetching metadata", error: null })
+    setProgress(25)
 
     try {
       const [cid, encryptedKeyPayload] = await Promise.all([
@@ -158,22 +183,26 @@ export function DownloadPanel() {
       }
 
       setStatus({ step: "Unwrapping AES key", error: null })
+      setProgress(45)
       const aesKeyBase64 = await unwrapAesKeyWithRsa(privateKey, parsed.wrappedKey)
 
       setStatus({ step: "Downloading encrypted file", error: null })
+      setProgress(65)
       const encryptedBlob = await retrieveFromPinata(cid)
-      const ciphertext = await encryptedBlob.text()
+  const ciphertext = await encryptedBlob.text()
 
       setStatus({ step: "Decrypting", error: null })
+      setProgress(85)
       const decryptedBase64 = await decryptData(ciphertext, aesKeyBase64, parsed.iv)
       const fileBytes = base64ToUint8Array(decryptedBase64)
 
       setStatus({ step: "Preparing download", error: null })
+      setProgress(95)
       const mimeType = typeof parsed?.mimeType === "string" && parsed.mimeType.length ? parsed.mimeType : "application/octet-stream"
       const filename = typeof parsed?.originalName === "string" && parsed.originalName.length ? parsed.originalName : `${fileId.trim()}.bin`
-  const arrayBuffer = new ArrayBuffer(fileBytes.byteLength)
-  new Uint8Array(arrayBuffer).set(fileBytes)
-  const blob = new Blob([arrayBuffer], { type: mimeType })
+      const arrayBuffer = new ArrayBuffer(fileBytes.byteLength)
+      new Uint8Array(arrayBuffer).set(fileBytes)
+      const blob = new Blob([arrayBuffer], { type: mimeType })
       const downloadUrl = URL.createObjectURL(blob)
 
       setResult({
@@ -186,8 +215,9 @@ export function DownloadPanel() {
         sharedAt: typeof parsed?.sharedAt === "string" ? parsed.sharedAt : undefined,
         note: typeof parsed?.note === "string" && parsed.note.length ? parsed.note : undefined,
       })
-      setRawPayload(JSON.stringify(parsed, null, 2))
       setStatus({ step: "Ready to download", error: null })
+      setProgress(100)
+      toast({ title: "Decryption ready", description: `Recovered ${filename}` })
     } catch (error: unknown) {
       let message = error instanceof Error ? error.message : "Download failed"
       if (error instanceof Error && /execution reverted/i.test(error.message)) {
@@ -195,9 +225,56 @@ export function DownloadPanel() {
       }
       console.error("[download-panel] Failed to download", error)
       setStatus({ step: "Failed", error: message })
+      setProgress(0)
+      toast({ title: "Download failed", description: message })
     } finally {
       setIsProcessing(false)
     }
+  }
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return
+    }
+    if (rememberFileId) {
+      if (fileId.trim()) {
+        window.localStorage.setItem(LAST_FILE_ID_KEY, fileId.trim())
+      }
+      window.localStorage.setItem(CACHE_OPT_IN_KEY, "true")
+    } else {
+      window.localStorage.setItem(CACHE_OPT_IN_KEY, "false")
+      window.localStorage.removeItem(LAST_FILE_ID_KEY)
+    }
+  }, [fileId, rememberFileId])
+
+  const handleSavePrivateKey = () => {
+    if (!privateKeyDraft.trim()) {
+      toast({ title: "No private key", description: "Paste your RSA private key before saving." })
+      return
+    }
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(RSA_PRIVATE_KEY_STORAGE_KEY, privateKeyDraft.trim())
+    }
+    setPrivateKey(privateKeyDraft.trim())
+    toast({ title: "Private key saved", description: "RSA private key stored locally." })
+  }
+
+  const handleClearPrivateKey = () => {
+    if (typeof window !== "undefined") {
+      window.localStorage.removeItem(RSA_PRIVATE_KEY_STORAGE_KEY)
+    }
+    setPrivateKey(null)
+    setPrivateKeyDraft("")
+    toast({ title: "Private key removed", description: "Private key cleared from local storage." })
+  }
+
+  const handleCopyPrivateKey = () => {
+    if (!privateKey) {
+      toast({ title: "No private key", description: "Generate or import a key first." })
+      return
+    }
+    void navigator.clipboard.writeText(privateKey)
+    toast({ title: "Copied", description: "Private key copied to clipboard." })
   }
 
   return (
@@ -244,21 +321,63 @@ export function DownloadPanel() {
         ) : null}
 
         <Card className="space-y-3 border border-slate-200 p-5">
-          <div className="grid gap-2">
-            <Label htmlFor="download-file-id">Shared file ID</Label>
-            <Input
-              id="download-file-id"
-              placeholder="0x..."
-              value={fileId}
-              onChange={handleFileIdChange}
-              disabled={isProcessing}
+          <div className="grid gap-2 rounded-md border border-dashed border-slate-200 bg-slate-50 p-3 text-sm text-slate-600">
+            <p className="font-medium text-slate-700">RSA private key</p>
+            <Textarea
+              rows={4}
+              placeholder="-----BEGIN PRIVATE KEY-----"
+              value={privateKeyDraft}
+              onChange={(event) => setPrivateKeyDraft(event.target.value)}
             />
+            <div className="flex flex-wrap gap-2">
+              <Button type="button" size="sm" onClick={handleSavePrivateKey}>
+                Save key
+              </Button>
+              <Button type="button" size="sm" variant="outline" onClick={handleCopyPrivateKey}>
+                <Copy className="mr-2 h-4 w-4" /> Copy
+              </Button>
+              <Button type="button" size="sm" variant="outline" onClick={handleClearPrivateKey}>
+                Clear
+              </Button>
+            </div>
           </div>
 
-          <div className="rounded-md border border-dashed border-slate-200 bg-slate-50 p-4 text-sm text-slate-600">
-            <p>Wallet: {activeAccount ?? "Not connected"}</p>
-            <p>Status: {status.step}</p>
-            {status.error ? <p className="text-red-600">{status.error}</p> : null}
+          <div className="grid gap-4 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
+            <div className="space-y-4">
+              <div className="grid gap-2">
+                <Label htmlFor="download-file-id">Shared file ID</Label>
+                <Input
+                  id="download-file-id"
+                  placeholder="0x..."
+                  value={fileId}
+                  onChange={handleFileIdChange}
+                  disabled={isProcessing}
+                />
+              </div>
+              <div className="flex items-center gap-2 text-xs text-slate-500">
+                <Switch
+                  id="remember-file-id"
+                  checked={rememberFileId}
+                  onCheckedChange={(checked) => setRememberFileId(Boolean(checked))}
+                />
+                <Label htmlFor="remember-file-id" className="cursor-pointer text-xs text-slate-500">
+                  Remember last file ID on this device
+                </Label>
+              </div>
+              <p className="text-xs text-slate-500">
+                Paste the identifier shared with you after access was granted. We will verify permissions on-chain before
+                decrypting the content locally.
+              </p>
+            </div>
+            <div className="space-y-3 rounded-md border border-dashed border-slate-200 bg-slate-50 p-4 text-sm text-slate-600">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="font-medium text-slate-700">Progress</p>
+                <Badge variant={status.error ? "destructive" : "secondary"}>{status.step || (status.error ? "Error" : "Idle")}</Badge>
+              </div>
+              <p className="text-xs text-slate-500 break-all">Wallet: {activeAccount ?? "Not connected"}</p>
+              {status.error ? <p className="text-sm text-red-600">{status.error}</p> : null}
+              <Progress value={progress} aria-label="Download progress" />
+            </div>
           </div>
 
           {result ? (
@@ -286,13 +405,6 @@ export function DownloadPanel() {
                 </Button>
               </AlertDescription>
             </Alert>
-          ) : null}
-
-          {rawPayload ? (
-            <div className="grid gap-2">
-              <Label>Shared payload (debug)</Label>
-              <Textarea value={rawPayload} readOnly rows={8} className="font-mono text-xs" />
-            </div>
           ) : null}
         </Card>
 

@@ -108,8 +108,21 @@ export async function decryptData(base64Ciphertext: string, base64Key: string, b
   }
 }
 
-function stripPem(pem: string): ArrayBuffer {
-  const cleaned = pem.replace(/-----BEGIN [^-]+-----/g, "").replace(/-----END [^-]+-----/g, "").replace(/\s+/g, "")
+function validatePem(pem: string, type: "PUBLIC" | "PRIVATE"): string {
+  const trimmed = pem.trim()
+  const header = `-----BEGIN ${type} KEY-----`
+  const footer = `-----END ${type} KEY-----`
+
+  if (!trimmed.includes(header) || !trimmed.includes(footer)) {
+    throw new Error(`Invalid RSA ${type.toLowerCase()} key. Expected PEM with ${header} / ${footer}.`)
+  }
+
+  return trimmed
+}
+
+function stripPem(pem: string, type: "PUBLIC" | "PRIVATE"): ArrayBuffer {
+  const validated = validatePem(pem, type)
+  const cleaned = validated.replace(/-----BEGIN [^-]+-----/g, "").replace(/-----END [^-]+-----/g, "").replace(/\s+/g, "")
   return base64ToArrayBuffer(cleaned)
 }
 
@@ -146,30 +159,44 @@ export async function generateRsaKeyPair(): Promise<{ publicKey: string; private
 
 async function importRsaPublicKey(publicKeyPem: string): Promise<CryptoKey> {
   const subtle = getSubtle()
-  return subtle.importKey(
-    "spki",
-    stripPem(publicKeyPem),
-    {
-      name: "RSA-OAEP",
-      hash: "SHA-256",
-    },
-    true,
-    ["encrypt"],
-  )
+  try {
+    return await subtle.importKey(
+      "spki",
+      stripPem(publicKeyPem, "PUBLIC"),
+      {
+        name: "RSA-OAEP",
+        hash: "SHA-256",
+      },
+      true,
+      ["encrypt"],
+    )
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "DataError") {
+      throw new Error("Invalid RSA public key. Ensure the full PEM export is pasted, including header and footer.")
+    }
+    throw error
+  }
 }
 
 async function importRsaPrivateKey(privateKeyPem: string): Promise<CryptoKey> {
   const subtle = getSubtle()
-  return subtle.importKey(
-    "pkcs8",
-    stripPem(privateKeyPem),
-    {
-      name: "RSA-OAEP",
-      hash: "SHA-256",
-    },
-    true,
-    ["decrypt"],
-  )
+  try {
+    return await subtle.importKey(
+      "pkcs8",
+      stripPem(privateKeyPem, "PRIVATE"),
+      {
+        name: "RSA-OAEP",
+        hash: "SHA-256",
+      },
+      true,
+      ["decrypt"],
+    )
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "DataError") {
+      throw new Error("Invalid RSA private key. Double-check that the PEM is correct and unmodified.")
+    }
+    throw error
+  }
 }
 
 /**

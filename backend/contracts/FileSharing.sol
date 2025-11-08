@@ -2,83 +2,122 @@
 pragma solidity ^0.8.20;
 
 contract FileSharing {
-    struct FileMetadata {
-        string ipfsHash;
+    struct FileRecord {
+        string cid;
         address owner;
-        uint256 timestamp;
-        string encryptionKey;
-        bool isPublic;
+        uint256 registeredAt;
     }
 
-    struct AccessGrant {
-        address grantee;
-        uint256 grantedAt;
-        bool revoked;
+    mapping(bytes32 => FileRecord) private files;
+    mapping(address => bytes32[]) private ownerFiles;
+    mapping(bytes32 => mapping(address => string)) private encryptedKeys;
+    mapping(bytes32 => mapping(address => bool)) private hasAccess;
+
+    event FileRegistered(bytes32 indexed fileId, address indexed owner, string cid);
+    event AccessGranted(bytes32 indexed fileId, address indexed owner, address indexed recipient);
+    event AccessRevoked(bytes32 indexed fileId, address indexed owner, address indexed recipient);
+
+    error FileAlreadyRegistered();
+    error FileNotFound();
+    error NotFileOwner();
+    error AccessDenied();
+    error InvalidRecipient();
+    error InvalidFileData();
+    error InvalidKey();
+    error AccessAlreadyGranted();
+    error AccessNotGranted();
+
+    function registerFile(bytes32 fileId, string calldata cid, string calldata ownerEncryptedKey) external {
+        if (fileId == bytes32(0) || bytes(cid).length == 0 || bytes(ownerEncryptedKey).length == 0) {
+            revert InvalidFileData();
+        }
+
+        FileRecord storage record = files[fileId];
+        if (record.owner != address(0)) {
+            revert FileAlreadyRegistered();
+        }
+
+        files[fileId] = FileRecord({ cid: cid, owner: msg.sender, registeredAt: block.timestamp });
+        ownerFiles[msg.sender].push(fileId);
+
+        encryptedKeys[fileId][msg.sender] = ownerEncryptedKey;
+        hasAccess[fileId][msg.sender] = true;
+
+        emit FileRegistered(fileId, msg.sender, cid);
     }
 
-    mapping(bytes32 => FileMetadata) public files;
-    mapping(bytes32 => AccessGrant[]) public fileAccess;
-    mapping(address => bytes32[]) public userFiles;
+    function grantAccess(bytes32 fileId, address recipient, string calldata wrappedKey) external {
+        FileRecord storage record = files[fileId];
+        if (record.owner == address(0)) {
+            revert FileNotFound();
+        }
+        if (record.owner != msg.sender) {
+            revert NotFileOwner();
+        }
+        if (recipient == address(0) || recipient == msg.sender) {
+            revert InvalidRecipient();
+        }
+        if (bytes(wrappedKey).length == 0) {
+            revert InvalidKey();
+        }
+        if (hasAccess[fileId][recipient]) {
+            revert AccessAlreadyGranted();
+        }
 
-    event FileUploaded(bytes32 indexed fileId, address indexed owner, string ipfsHash);
-    event FileShared(bytes32 indexed fileId, address indexed from, address indexed to);
-    event FileRevoked(bytes32 indexed fileId, address indexed from, address indexed to);
-    event FileDeleted(bytes32 indexed fileId, address indexed owner);
+        encryptedKeys[fileId][recipient] = wrappedKey;
+        hasAccess[fileId][recipient] = true;
 
-    function uploadFile(
-        string memory ipfsHash,
-        string memory encryptionKey,
-        bool isPublic
-    ) external returns (bytes32) {
-        bytes32 fileId = keccak256(abi.encodePacked(msg.sender, ipfsHash, block.timestamp));
-        
-        files[fileId] = FileMetadata({
-            ipfsHash: ipfsHash,
-            owner: msg.sender,
-            timestamp: block.timestamp,
-            encryptionKey: encryptionKey,
-            isPublic: isPublic
-        });
-
-        userFiles[msg.sender].push(fileId);
-        emit FileUploaded(fileId, msg.sender, ipfsHash);
-        return fileId;
-    }
-
-    function shareFile(bytes32 fileId, address recipient) external {
-        require(files[fileId].owner == msg.sender, "Only owner can share");
-        require(recipient != address(0), "Invalid recipient");
-
-        fileAccess[fileId].push(AccessGrant({
-            grantee: recipient,
-            grantedAt: block.timestamp,
-            revoked: false
-        }));
-
-        emit FileShared(fileId, msg.sender, recipient);
+        emit AccessGranted(fileId, msg.sender, recipient);
     }
 
     function revokeAccess(bytes32 fileId, address recipient) external {
-        require(files[fileId].owner == msg.sender, "Only owner can revoke");
-
-        for (uint256 i = 0; i < fileAccess[fileId].length; i++) {
-            if (fileAccess[fileId][i].grantee == recipient && !fileAccess[fileId][i].revoked) {
-                fileAccess[fileId][i].revoked = true;
-                emit FileRevoked(fileId, msg.sender, recipient);
-                break;
-            }
+        FileRecord storage record = files[fileId];
+        if (record.owner == address(0)) {
+            revert FileNotFound();
         }
+        if (record.owner != msg.sender) {
+            revert NotFileOwner();
+        }
+        if (!hasAccess[fileId][recipient]) {
+            revert AccessNotGranted();
+        }
+
+        hasAccess[fileId][recipient] = false;
+        delete encryptedKeys[fileId][recipient];
+
+        emit AccessRevoked(fileId, msg.sender, recipient);
     }
 
-    function getFileMetadata(bytes32 fileId) external view returns (FileMetadata memory) {
-        return files[fileId];
+    function getCid(bytes32 fileId) external view returns (string memory) {
+        FileRecord storage record = files[fileId];
+        if (record.owner == address(0)) {
+            revert FileNotFound();
+        }
+        if (!hasAccess[fileId][msg.sender]) {
+            revert AccessDenied();
+        }
+        return record.cid;
     }
 
-    function getUserFiles(address user) external view returns (bytes32[] memory) {
-        return userFiles[user];
+    function getEncryptedKey(bytes32 fileId, address user) external view returns (string memory) {
+        FileRecord storage record = files[fileId];
+        if (record.owner == address(0)) {
+            revert FileNotFound();
+        }
+        if (msg.sender != user && msg.sender != record.owner) {
+            revert AccessDenied();
+        }
+        if (!hasAccess[fileId][user]) {
+            revert AccessNotGranted();
+        }
+        return encryptedKeys[fileId][user];
     }
 
-    function getFileAccess(bytes32 fileId) external view returns (AccessGrant[] memory) {
-        return fileAccess[fileId];
+    function getOwnerFiles(address owner) external view returns (bytes32[] memory) {
+        return ownerFiles[owner];
+    }
+
+    function hasFileAccess(bytes32 fileId, address user) external view returns (bool) {
+        return hasAccess[fileId][user];
     }
 }

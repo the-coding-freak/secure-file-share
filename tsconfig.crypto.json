@@ -1,0 +1,14 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "allowImportingTsExtensions": false,
+    "noEmit": false
+  },
+  "include": [
+    "scripts/crypto-self-test.ts",
+    "scripts/pinata-roundtrip.ts",
+    "lib/**/*.ts"
+  ]
+}

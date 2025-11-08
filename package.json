@@ -6,6 +6,8 @@
     "backend:deploy": "cd backend && npm run deploy",
     "backend:node": "cd backend && npm run node",
     "backend:test": "cd backend && npm run test",
+  "crypto:self-test": "ts-node --project tsconfig.crypto.json scripts/crypto-self-test.ts",
+  "pinata:self-test": "ts-node --project tsconfig.crypto.json scripts/pinata-roundtrip.ts",
     "build": "next build",
   "dev": "next dev -H 192.168.0.111 -p 3000",
     "lint": "eslint .",
@@ -76,6 +78,7 @@
     "@types/react-dom": "^19",
     "postcss": "^8.5",
     "tailwindcss": "^4.1.9",
+    "ts-node": "^10.9.2",
     "typescript": "^5"
   }
 }

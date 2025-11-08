@@ -1,15 +1,17 @@
 import type { AbstractProvider } from "ethers"
-import { BrowserProvider, Contract, JsonRpcProvider } from "ethers"
+import { BrowserProvider, Contract, JsonRpcProvider, hexlify, randomBytes } from "ethers"
 
 const CONTRACT_ABI = [
-  "event FileUploaded(bytes32 indexed fileId, address indexed owner, string ipfsHash)",
-  "event FileShared(bytes32 indexed fileId, address indexed from, address indexed to)",
-  "event FileRevoked(bytes32 indexed fileId, address indexed from, address indexed to)",
-  "function uploadFile(string ipfsHash, string encryptionKey, bool isPublic) returns (bytes32)",
-  "function shareFile(bytes32 fileId, address recipient)",
+  "event FileRegistered(bytes32 indexed fileId, address indexed owner, string cid)",
+  "event AccessGranted(bytes32 indexed fileId, address indexed owner, address indexed recipient)",
+  "event AccessRevoked(bytes32 indexed fileId, address indexed owner, address indexed recipient)",
+  "function registerFile(bytes32 fileId, string cid, string ownerEncryptedKey)",
+  "function grantAccess(bytes32 fileId, address recipient, string wrappedKey)",
   "function revokeAccess(bytes32 fileId, address recipient)",
-  "function getFileMetadata(bytes32 fileId) view returns (tuple(string ipfsHash, address owner, uint256 timestamp, string encryptionKey, bool isPublic))",
-  "function getUserFiles(address user) view returns (bytes32[])",
+  "function getCid(bytes32 fileId) view returns (string)",
+  "function getEncryptedKey(bytes32 fileId, address user) view returns (string)",
+  "function getOwnerFiles(address owner) view returns (bytes32[])",
+  "function hasFileAccess(bytes32 fileId, address user) view returns (bool)",
 ]
 
 const ENV_RPC_URL = process.env.NEXT_PUBLIC_RPC_URL
@@ -118,6 +120,14 @@ async function getWriteContract(): Promise<Contract> {
   return cachedWriteContract
 }
 
+async function getSignerAddress(contract: Contract): Promise<string> {
+  const runner = contract.runner as { getAddress?: () => Promise<string> } | null
+  if (!runner?.getAddress) {
+    throw new Error("Wallet signer not available")
+  }
+  return runner.getAddress()
+}
+
 export async function isContractDeployed(): Promise<boolean> {
   try {
     const response = await fetch("/deployment.json")
@@ -139,96 +149,134 @@ export async function initializeContract(): Promise<void> {
   }
 }
 
-export async function uploadFileToBlockchain(ipfsHash: string, encryptionKey: string, isPublic = false): Promise<{ hash: string; fileId?: string }> {
-  try {
-    const contract = await getWriteContract()
-    const tx = await contract.uploadFile(ipfsHash, encryptionKey, isPublic)
-    console.log("[v0] Upload transaction sent:", tx.hash)
-    const receipt = await tx.wait()
-
-    let fileId: string | undefined
-    for (const log of receipt.logs) {
-      try {
-        const parsed = contract.interface.parseLog(log)
-        if (parsed?.name === "FileUploaded" && parsed.args?.fileId) {
-          fileId = parsed.args.fileId as string
-          break
-        }
-      } catch {
-        // ignore non-matching logs
-      }
-    }
-
-    return { hash: tx.hash, fileId }
-  } catch (error) {
-    console.error("[v0] Blockchain upload error:", error)
-    throw error
-  }
+export function createFileId(): string {
+  return hexlify(randomBytes(32))
 }
 
-export async function shareFileWithUser(fileId: string, recipientAddress: string): Promise<{ hash: string }> {
+export async function registerFileOnChain(fileId: string, cid: string, ownerEncryptedKey: string): Promise<{ txHash: string }> {
   try {
     const contract = await getWriteContract()
-    const tx = await contract.shareFile(fileId, recipientAddress)
-    console.log("[v0] Share transaction sent:", tx.hash)
+    const tx = await contract.registerFile(fileId, cid, ownerEncryptedKey)
+    console.log("[v0] File registered:", tx.hash)
     await tx.wait()
-    return { hash: tx.hash }
+    return { txHash: tx.hash }
   } catch (error) {
-    console.error("[v0] Share error:", error)
+    console.error("[v0] registerFile error:", error)
     throw error
   }
 }
 
-export async function revokeFileAccess(fileId: string, recipientAddress: string): Promise<{ hash: string }> {
+export async function grantAccessOnChain(fileId: string, recipientAddress: string, wrappedKey: string): Promise<{ txHash: string }> {
+  try {
+    const contract = await getWriteContract()
+    const tx = await contract.grantAccess(fileId, recipientAddress, wrappedKey)
+    console.log("[v0] Access granted tx:", tx.hash)
+    await tx.wait()
+    return { txHash: tx.hash }
+  } catch (error) {
+    console.error("[v0] grantAccess error:", error)
+    throw error
+  }
+}
+
+export async function revokeFileAccess(fileId: string, recipientAddress: string): Promise<{ txHash: string }> {
   try {
     const contract = await getWriteContract()
     const tx = await contract.revokeAccess(fileId, recipientAddress)
-    console.log("[v0] Revoke transaction sent:", tx.hash)
+    console.log("[v0] Access revoked tx:", tx.hash)
     await tx.wait()
-    return { hash: tx.hash }
+    return { txHash: tx.hash }
   } catch (error) {
-    console.error("[v0] Revoke error:", error)
+    console.error("[v0] revokeAccess error:", error)
     throw error
   }
 }
 
-export async function getFileMetadata(fileId: string): Promise<{
-  ipfsHash: string
-  owner: string
-  timestamp: bigint
-  encryptionKey: string
-  isPublic: boolean
-}> {
+export async function getOwnerFileIds(ownerAddress: string): Promise<string[]> {
   try {
     const contract = await getReadContract()
-    const metadata = await contract.getFileMetadata(fileId)
-    return {
-      ipfsHash: metadata.ipfsHash,
-      owner: metadata.owner,
-      timestamp: metadata.timestamp,
-      encryptionKey: metadata.encryptionKey,
-      isPublic: metadata.isPublic,
-    }
+    const ids = await contract.getOwnerFiles(ownerAddress)
+    return ids.map((id: string) => id)
   } catch (error) {
-    console.error("[v0] Metadata fetch error:", error)
+    console.error("[v0] getOwnerFileIds error:", error)
     throw error
   }
+}
+
+export async function getCidForFile(fileId: string): Promise<string> {
+  try {
+    const contract = await getReadContract()
+    return await contract.getCid(fileId)
+  } catch (error) {
+    console.error("[v0] getCid error:", error)
+    throw error
+  }
+}
+
+export async function getEncryptedKeyForUser(fileId: string, userAddress: string): Promise<string> {
+  try {
+    const contract = await getReadContract()
+    return await contract.getEncryptedKey(fileId, userAddress)
+  } catch (error) {
+    console.error("[v0] getEncryptedKey error:", error)
+    throw error
+  }
+}
+
+export async function getCidForCurrentAccount(fileId: string): Promise<string> {
+  const contract = await getWriteContract()
+  try {
+    return await contract.getCid(fileId)
+  } catch (error) {
+    console.error("[v0] getCidForCurrentAccount error:", error)
+    throw error
+  }
+}
+
+export async function getEncryptedKeyForCurrentAccount(fileId: string): Promise<string> {
+  const contract = await getWriteContract()
+  try {
+    const caller = await getSignerAddress(contract)
+    return await contract.getEncryptedKey(fileId, caller)
+  } catch (error) {
+    console.error("[v0] getEncryptedKeyForCurrentAccount error:", error)
+    throw error
+  }
+}
+
+export async function hasUserAccess(fileId: string, userAddress: string): Promise<boolean> {
+  try {
+    const contract = await getReadContract()
+    return await contract.hasFileAccess(fileId, userAddress)
+  } catch (error) {
+    console.error("[v0] hasUserAccess error:", error)
+    throw error
+  }
+}
+
+// Backwards-compatible helpers retained for older components/tests.
+export async function uploadFileToBlockchain(ipfsHash: string, encryptionPayload: string): Promise<{ hash: string; fileId?: string }> {
+  const fileId = createFileId()
+  const { txHash } = await registerFileOnChain(fileId, ipfsHash, encryptionPayload)
+  return { hash: txHash, fileId }
+}
+
+export async function shareFileWithUser(fileId: string, recipientAddress: string, wrappedKey: string): Promise<{ hash: string }> {
+  const { txHash } = await grantAccessOnChain(fileId, recipientAddress, wrappedKey)
+  return { hash: txHash }
 }
 
 export async function getUserFilesList(userAddress: string): Promise<string[]> {
-  try {
-    const contract = await getReadContract()
-    const files = await contract.getUserFiles(userAddress)
-    return files.map((fileId: string) => fileId)
-  } catch (error) {
-    console.error("[v0] User files fetch error:", error)
-    if ((error as any)?.code === "BAD_DATA") {
-      throw new Error(
-        "Failed to read files from contract. Ensure the Hardhat node is running and the contract is deployed on the current network.",
-      )
-    }
-    throw error
-  }
+  return getOwnerFileIds(userAddress)
+}
+
+export async function getFileMetadata(fileId: string, userAddress: string): Promise<{
+  cid: string
+  encryptedKey: string
+}> {
+  const cid = await getCidForFile(fileId)
+  const encryptedKey = await getEncryptedKeyForUser(fileId, userAddress)
+  return { cid, encryptedKey }
 }
 
 export function clearCachedContracts(): void {
